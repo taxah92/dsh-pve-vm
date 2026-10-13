@@ -11,6 +11,8 @@
  */
 import { Config, resolveSettings, snapshot } from './lib/config.js';
 import { VmController } from './lib/session.js';
+import { ConsoleView } from './lib/view.js';
+import { registerViewRoutes } from './lib/routes.js';
 import { consoleTools } from './tools/console.js';
 import { guestTools } from './tools/guest.js';
 
@@ -34,6 +36,13 @@ export function apply(ctx, config) {
 
   const deps = { controller, settings, attachments: ctx.attachments };
   for (const tool of [...consoleTools(deps), ...guestTools(deps)]) ctx.tools.register(tool);
+
+  // Observation panel: the client half pulls frames from these routes. A
+  // composition may have no web server at all (headless profile) — then there is
+  // simply no panel while the tools keep working, so the dependency is declared
+  // through ctx.inject instead of the plugin's mandatory `inject` list.
+  const view = new ConsoleView({ controller, settings });
+  ctx.inject(['webServer'], (scoped) => registerViewRoutes(scoped.webServer, { view }));
 
   // The computer-use slot is per composition: if another provider has already taken it,
   // the plugin tools still work, so the error is only recorded.

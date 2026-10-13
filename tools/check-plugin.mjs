@@ -63,10 +63,16 @@ const configValues = {
   allowVmids: [4242],
   enableConsole: true,
   enableGuest: true,
+  inputChannel: 'auto',
+  sendkeyDelayMs: 80,
   consoleTimeoutMs: 20000,
   sessionIdleMs: 300000,
   guestTimeoutMs: 60000,
   guestTypeCommand: 'echo {base64}',
+  viewAutoOpen: false,
+  viewFollowAgent: true,
+  viewFps: 2,
+  viewScale: 2,
 };
 const liveConfig = Object.fromEntries(Object.entries(configValues).map(([key, value]) => [key, live(value)]));
 
@@ -145,10 +151,103 @@ try {
   const settings = resolveSettings(snapshot(liveConfig));
   if (!Array.isArray(settings.allowVmids) || settings.allowVmids[0] !== 4242) note('resolveSettings: allowVmids parsed incorrectly');
   if (typeof settings.guestTypeCommand !== 'string') note('resolveSettings: guestTypeCommand is not a string');
+  // The input-channel keys must reach the tools from the form: without them the
+  // setting is silently ignored (inputChannel/sendkeyDelayMs were lost that way once).
+  if (settings.inputChannel !== 'auto') note(`resolveSettings: inputChannel = ${settings.inputChannel}, expected auto`);
+  if (settings.sendkeyDelayMs !== 80) note(`resolveSettings: sendkeyDelayMs = ${settings.sendkeyDelayMs}, expected 80`);
+  // The observation panel values from the same form, plus their bounds.
+  if (settings.view.fps !== 2 || settings.view.scale !== 2) note('resolveSettings: panel pace and divisor are not 2 by default');
+  if (settings.view.autoOpen !== false) note('resolveSettings: panel auto-open must be off by default');
+  if (settings.view.followAgent !== true) note('resolveSettings: following the agent is on by default');
+  const wild = resolveSettings({ viewFps: 99, viewScale: 0 });
+  if (wild.view.fps !== 4 || wild.view.scale !== 1) note(`resolveSettings: panel bounds are not honoured (${wild.view.fps}/${wild.view.scale})`);
   // The settings service hands `.volatile()` fields out as live references even on a direct schema call.
   if (resolved.sshHost?.get?.() !== 'proxmox') note('Config: sshHost was not applied');
 } catch (error) {
   note(`settings check threw: ${error.stack ?? error}`);
+}
+
+// Panel routes: the inventory, the fence and the state answer. Frames need a live
+// VM, so only what is decided without a node is checked here.
+try {
+  const { registerViewRoutes, VIEW_BASE } = await import('../lib/routes.js');
+  const routes = [];
+  let disposers = 0;
+  const webServer = {
+    register(route) {
+      routes.push(route);
+      return () => {
+        disposers += 1;
+      };
+    },
+  };
+  const state = {
+    allowed: [4242],
+    consoleEnabled: true,
+    sessions: [],
+    last: null,
+    view: { autoOpen: false, followAgent: true, fps: 2, scale: 2 },
+  };
+  const dispose = registerViewRoutes(webServer, {
+    view: { state: () => state, frame: async () => ({ png: Buffer.alloc(0), meta: {} }), release: () => true },
+  });
+  const paths = routes.map((route) => route.path);
+  for (const expected of [`${VIEW_BASE}/state`, `${VIEW_BASE}/frame`, `${VIEW_BASE}/release`]) {
+    if (!paths.includes(expected)) note(`route ${expected} is not registered (have: ${paths.join(', ')})`);
+  }
+
+  /** A minimal response: it records the status and the body. */
+  const response = () => ({
+    status: 0,
+    headers: {},
+    body: '',
+    headersSent: false,
+    writeHead(status, headers) {
+      this.status = status;
+      this.headers = headers ?? {};
+      this.headersSent = true;
+    },
+    end(payload) {
+      this.body = payload === undefined ? '' : Buffer.isBuffer(payload) ? payload.toString('utf8') : String(payload);
+    },
+  });
+
+  const stateRoute = routes.find((route) => route.path === `${VIEW_BASE}/state`);
+  const allowed = response();
+  stateRoute.handler({ method: 'GET', url: `${VIEW_BASE}/state`, headers: { host: '127.0.0.1:3080' } }, allowed);
+  if (allowed.status !== 200) note(`state: status ${allowed.status}, expected 200`);
+  if (JSON.parse(allowed.body || '{}').allowed?.[0] !== 4242) note('state: the answer carries no allowVmids');
+
+  const foreignHost = response();
+  stateRoute.handler({ method: 'GET', url: `${VIEW_BASE}/state`, headers: { host: 'pve.example.net' } }, foreignHost);
+  if (foreignHost.status !== 403) note(`state: a foreign Host was not refused (status ${foreignHost.status})`);
+
+  const crossSite = response();
+  stateRoute.handler(
+    { method: 'GET', url: `${VIEW_BASE}/state`, headers: { host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site' } },
+    crossSite,
+  );
+  if (crossSite.status !== 403) note(`state: a cross-site request was not refused (status ${crossSite.status})`);
+
+  const foreignOrigin = response();
+  stateRoute.handler(
+    { method: 'GET', url: `${VIEW_BASE}/state`, headers: { host: '127.0.0.1:3080', origin: 'http://evil.example' } },
+    foreignOrigin,
+  );
+  if (foreignOrigin.status !== 403) note(`state: a foreign Origin was not refused (status ${foreignOrigin.status})`);
+
+  const releaseRoute = routes.find((route) => route.path === `${VIEW_BASE}/release`);
+  const wrongBody = response();
+  releaseRoute.handler(
+    { method: 'POST', url: `${VIEW_BASE}/release`, headers: { host: '127.0.0.1:3080', 'content-type': 'text/plain' } },
+    wrongBody,
+  );
+  if (wrongBody.status !== 403) note(`release: a non-JSON body was not refused (status ${wrongBody.status})`);
+
+  dispose();
+  if (disposers !== routes.length) note(`the disposer removed ${disposers} of ${routes.length} routes`);
+} catch (error) {
+  note(`panel route check threw: ${error.stack ?? error}`);
 }
 
 const summary = {

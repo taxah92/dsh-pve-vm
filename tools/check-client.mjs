@@ -72,55 +72,108 @@ else {
     if (typeof module.apply === 'function') {
       const effects = [];
       const dictionaries = [];
-      const slots = [];
+      const slotNames = [];
       const registrations = [];
+      const tabTypes = [];
+      const scopedInjections = [];
+      const openTabs = [];
+      const locale = {
+        register: (ns, localeId, dict) => {
+          dictionaries.push(`${ns}/${localeId}`);
+          if (typeof dict !== 'object') note(`dictionary ${ns}/${localeId} is not an object`);
+          return () => {};
+        },
+        getLocale: () => ({ active: 'ru', locales: [], revision: 1 }),
+        subscribe: () => () => {},
+        // bind is the standard translation path: it reads the active locale on each call.
+        bind: (ns) => (key) => `${ns}:${key}`,
+      };
+      const slots = {
+        inject: (slot, callback) => {
+          slotNames.push(slot);
+          callback();
+          return () => {};
+        },
+        register: (registration, component) => {
+          registrations.push({ registration, component });
+          return () => {};
+        },
+      };
+      const configForms = {
+        get: () => ({ getSnapshot: () => ({ status: 'ready', value: {}, writable: true }), subscribe: () => () => {} }),
+      };
+      const sidebarRight = {
+        mounted: { getSnapshot: () => 'session-1', subscribe: () => () => {} },
+        openTabIn: (sessionId, kind) => openTabs.push({ sessionId, kind }),
+      };
+      const sidebarRightTabs = { register: (definition) => (tabTypes.push(definition), () => {}) };
       const ctx = {
         effect: (fn, label) => {
           effects.push(label ?? '(no label)');
           const disposer = fn();
           return typeof disposer === 'function' ? disposer : () => {};
         },
-        locale: {
-          register: (ns, locale, dict) => {
-            dictionaries.push(`${ns}/${locale}`);
-            if (typeof dict !== 'object') note(`dictionary ${ns}/${locale} is not an object`);
-            return () => {};
-          },
-          getLocale: () => ({ active: 'ru', locales: [], revision: 1 }),
-          subscribe: () => () => {},
-          // bind is the standard translation path: it reads the active locale on each call.
-          bind: (ns) => (key) => `${ns}:${key}`,
+        locale,
+        slots,
+        configForms,
+        // ctx.inject is the declared dependency on the right sidebar: the callback
+        // receives a scoped context and its disposer runs when the plugin unloads.
+        inject: (services, callback) => {
+          scopedInjections.push(services.join('+'));
+          const dispose = callback({ slots, sidebarRight, sidebarRightTabs, locale, configForms });
+          return typeof dispose === 'function' ? dispose : () => {};
         },
-        slots: {
-          inject: (slot, callback) => {
-            slots.push(slot);
-            callback();
-          },
-          register: (registration, component) => {
-            registrations.push({ registration, component });
-            return () => {};
-          },
-        },
-        configForms: { get: () => ({ getSnapshot: () => ({ status: 'ready', value: {}, writable: true }) }) },
       };
       try {
         module.apply(ctx);
       } catch (error) {
         note(`apply threw: ${error.stack ?? error}`);
       }
-      if (slots.length === 0) note('the card did not subscribe to any slot');
-      for (const slot of slots) {
-        if (slot !== 'settings.section') note(`unexpected slot "${slot}" (expected settings.section)`);
+      if (slotNames.length === 0) note('the card did not subscribe to any slot');
+      for (const slot of slotNames) {
+        if (!['settings.section', 'sidebar.right.pane.tab', 'sidebar.right.pane.tab.title'].includes(slot)) {
+          note(`unexpected slot "${slot}"`);
+        }
+      }
+      for (const expected of ['settings.section', 'sidebar.right.pane.tab', 'sidebar.right.pane.tab.title']) {
+        if (!slotNames.includes(expected)) note(`nothing registers into the slot "${expected}"`);
+      }
+      if (!scopedInjections.some((entry) => entry.includes('sidebarRight') && entry.includes('sidebarRightTabs'))) {
+        note('the panel reads sidebarRight/sidebarRightTabs without declaring them through ctx.inject');
       }
       if (dictionaries.length < 2) note(`dictionaries registered: ${dictionaries.length} (expected ru and en)`);
       if (effects.length === 0) note('apply registered no effect');
-      for (const { registration, component } of registrations) {
-        if (registration.id !== 'pve-vm') note(`card id "${registration.id}", expected pve-vm (== the patch entry id)`);
-        if (typeof registration.label !== 'function' && typeof registration.label !== 'string') note('the card has no label');
-        if (typeof registration.inject !== 'function') note('registration without inject: the card will get neither ctx nor the translator');
-        else if (typeof registration.inject().ctx !== 'object') note('inject does not return ctx');
-        if (typeof component !== 'function') note('the second argument of register is not a component');
+      if (tabTypes.length !== 1) note(`tab types registered: ${tabTypes.length} (expected one)`);
+      for (const definition of tabTypes) {
+        if (definition.id !== 'dsh-pve-vm/console') note(`tab type id "${definition.id}"`);
+        if (typeof definition.kind !== 'string' || definition.kind.length === 0) note('the tab type has no kind');
+        if (typeof definition.title !== 'function') note('the tab type has no title');
+        if (!Array.isArray(definition.guide) || definition.guide.length === 0) note('the tab type will not appear in the sidebar guide');
       }
+      for (const { registration, component } of registrations) {
+        if (typeof component !== 'function') note('the second argument of register is not a component');
+        if (registration.name === 'settings.section') {
+          if (registration.id !== 'pve-vm') note(`card id "${registration.id}", expected pve-vm (== the patch entry id)`);
+          if (typeof registration.label !== 'function' && typeof registration.label !== 'string') note('the card has no label');
+          if (typeof registration.inject !== 'function') note('registration without inject: the card will get neither ctx nor the translator');
+          else if (typeof registration.inject().ctx !== 'object') note('inject does not return ctx');
+          continue;
+        }
+        // The tab body and its title register under the tab type's key.
+        if (registration.key !== 'dsh-pve-vm/console') note(`tab key "${registration.key}" does not match the type id`);
+        if (registration.locale !== 'pve-vm-ui') note(`the tab declares no dictionary: locale = ${registration.locale}`);
+        if (registration.name === 'sidebar.right.pane.tab') {
+          if (typeof registration.inject !== 'function') note('the tab body has no inject');
+          else {
+            const injected = registration.inject();
+            if (typeof injected.ctx !== 'object') note('the tab body does not receive ctx');
+            if (typeof injected.form?.getSnapshot !== 'function') note('the tab body does not receive the settings form');
+          }
+        }
+      }
+      // Auto-open must not fire on the very first state read: otherwise every page
+      // reload would open the tab because of the agent's older work.
+      if (openTabs.length !== 0) note('the tab auto-opened before the first agent mark');
     }
   }
 }

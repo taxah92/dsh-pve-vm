@@ -30,6 +30,9 @@ agent ──► plugin ──► ssh ──► node: qm vncproxy ──► unix 
 * **Clipboard** — `console_paste` writes UTF-8 text into the guest clipboard over RFB and presses
   Ctrl+V; `console_clipboard` reads the guest clipboard back, so text can leave the VM without OCR.
 * **A settings card** in the web UI (English and Russian labels), backed by the profile patch layer.
+* **A live screen panel** — the “VM screen” tab in the right sidebar shows the frames the agent
+  sees, taken from the very same VNC session, while the agent works. It follows the agent's VM
+  automatically or stays on the VM you pick by hand. Watching only: the panel never clicks or types.
 * **Zero runtime dependencies** — RFB, DES authentication, keysym tables and PNG encoding are
   implemented in this package on top of `node:crypto` and `node:zlib`. There is nothing to install
   on the host, and nothing to install on the node either.
@@ -95,6 +98,10 @@ layer, and the same values can be edited there by hand:
     sessionIdleMs: 300000
     guestTimeoutMs: 60000
     guestTypeCommand: ''        # script for typing non-ASCII text into a Linux guest
+    viewAutoOpen: false         # open the "VM screen" tab by itself when the agent touches a console
+    viewFollowAgent: true       # the panel follows the VM the agent works with
+    viewFps: 2                  # frame pace in the panel, 1–4
+    viewScale: 2                # frame resolution divisor: 1 native, 2 half, 4 quarter
 ```
 
 **First run checklist**
@@ -136,6 +143,33 @@ Every action tool accepts a common tail: `observe` (return a frame after the act
 | `vm_file_write` | `vmid`, `path`, `data` \| `dataBase64` | Write a file (up to 1 MB per call); parent directories are created. |
 | `vm_type_text` | `vmid`, `text`, `settleMs?`, `observe?` | Type text through the best available channel: ASCII → console, non-ASCII → the user session on Windows / `xdotool`–`wtype` on Linux. |
 | `vm_status` | `vmid?` | Is the VM allowed, does the agent answer, which OS, are there open console sessions. |
+
+## Watch the VM screen live
+
+The **VM screen** tab in the right sidebar shows what the agent sees while it works. Add it from the
+sidebar guide, or let `viewAutoOpen` reveal it the moment the agent touches a console.
+
+* The frames are taken from the agent's own RFB session — **no second VNC session appears** and the
+  `qm vncproxy` password is never reset under the agent's feet. Captures and the agent's tools share
+  one session queue, so they never tear the stream for each other.
+* `viewFollowAgent` keeps the panel on the VM the agent is working with; clicking a VM chip pins the
+  panel to that VM instead. `viewFps` (1–4) and `viewScale` (1 / 2 / 4) control the pace and the
+  resolution, and both can be changed on the fly inside the panel.
+* The panel is **watch-only**: no clicks, no typing, nothing is injected into the guest. A blank
+  frame is called out explicitly — the guest blanked its display or is locked.
+* Frames are served by the plugin's own routes (`/pve-vm/console/frame`, `/state`, `/release`) on the
+  harness web server, behind a loopback-only fence: a request is answered only when the `Host` is
+  loopback (`localhost`, `127.0.0.0/8`, `[::1]`), a present `Origin` matches `Host`, and
+  `sec-fetch-site: cross-site` is refused. If you bind the harness to your LAN, the panel stays dark
+  by design — the same fence the harness applies to `/api`.
+* **The fence is loopback, not the harness token.** These routes live outside `/api`, so the
+  harness URL token does not cover them (the browser-skill overview works the same way). Any
+  process on the same machine can therefore pull frames or call `/release`; that is the accepted
+  price of loading frames without a token on a single-user box. Serve VMs you would not mind a
+  local user seeing, and harden with a harness-issued token if that is not acceptable.
+* The console session stays open while the panel streams (the idle reaper does not take it); the
+  panel's “disconnect console” button closes it immediately. Streaming pauses by itself when the tab
+  is hidden.
 
 ## How it works
 

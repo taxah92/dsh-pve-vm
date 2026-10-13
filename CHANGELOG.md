@@ -3,6 +3,35 @@
 All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versions follow [SemVer](https://semver.org/).
 
+## [0.2.0] — 2026-10-13
+
+Watch the agent work: a live VM screen in the right sidebar of the web UI.
+
+### Added
+
+* **The “VM screen” tab** — a right-sidebar panel that streams the frames the agent sees. The frames
+  come from the agent's own RFB session, so no second VNC session appears and the `qm vncproxy`
+  password is never reset; captures and tools share one session queue. Watch-only by design: the
+  panel injects nothing into the guest.
+* **`viewAutoOpen`** (off by default) — reveal the tab by itself when the agent touches a console.
+* **`viewFollowAgent`** (on by default) — the panel follows the VM the agent works with; a VM chip
+  pins it by hand. Watching never counts as agent work: frame requests suppress the activity mark
+  (`withConsole(..., { mark: false })`), so the panel cannot chase itself.
+* **`viewFps`** (2) and **`viewScale`** (2) — frame pace and resolution divisor, both changeable on
+  the fly inside the panel.
+* **Host routes** `/pve-vm/console/state`, `/frame` and `/release` on the harness web server,
+  registered only when the composition has a `webServer`. They carry a loopback-only fence: Host must
+  be loopback, a present Origin must match Host, `sec-fetch-site: cross-site` is refused and POST must
+  be `application/json`. A harness bound to a LAN therefore keeps the panel dark.
+* `RfbClient.waitForUpdate({ idleOk: true })` — silence at a message boundary means "the screen did
+  not change" instead of an error, while a timeout inside a message stays fatal.
+
+### Fixed
+
+* **`inputChannel` and `sendkeyDelayMs` never reached the tools.** Both keys were missing from
+  `CONFIG_KEYS`, so `snapshot()` dropped them and every run silently used the built-in `auto`/80 ms
+  defaults. The form accepted the values, the code ignored them.
+
 ## [0.1.1] — 2026-10-13
 
 Linux guest support. Everything below was found by running the plugin against a real RedOS 8

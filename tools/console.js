@@ -2,7 +2,7 @@
  * Console tools: the screen frame and input over RFB.
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { encodePng, cropRegion, downscaleBox } from '../lib/png.js';
+import { encodePng, cropRegion, downscaleBox, looksBlank } from '../lib/png.js';
 import { encodeText, parseCombo } from '../lib/keys.js';
 import { comboToSendkey, textToSendkeys } from '../lib/hmp.js';
 import { planTyping } from '../lib/keys.js';
@@ -181,22 +181,6 @@ const OBSERVE_PARAMS = {
 
 /** Pause. */
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/**
- * A nearly uniform frame: most often a blanked display or a black lock screen.
- * Checked with a coarse sample so that we do not scan a million pixels.
- */
-function looksBlank(image) {
-  const step = Math.max(4, Math.floor((image.width * image.height) / 4096)) * 4;
-  let min = 255;
-  let max = 0;
-  for (let i = 0; i < image.data.length; i += step) {
-    const value = image.data[i];
-    if (value < min) min = value;
-    if (value > max) max = value;
-  }
-  return max - min <= 6;
-}
 
 /**
  * Input channel taken from the settings.

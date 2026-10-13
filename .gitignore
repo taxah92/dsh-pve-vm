@@ -13,3 +13,6 @@ tools/out/
 .ssh-config-*
 
 .DS_Store
+
+# Locally packed tarballs (npm pack output).
+*.tgz

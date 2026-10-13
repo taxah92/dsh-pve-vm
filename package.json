@@ -65,6 +65,9 @@
   "engines": {
     "node": ">=22"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh": ">=0.2.0-rc.2",
     "@deepseek-ai/dsh-tools": "^0.2.0-rc.1",
@@ -73,6 +76,7 @@
   "scripts": {
     "check": "node --check index.js && node --check client.js && node --check lib/config.js && node --check lib/guest.js && node --check lib/hmp.js && node --check lib/keys.js && node --check lib/png.js && node --check lib/rfb.js && node --check lib/session.js && node --check lib/ssh.js && node --check tools/console.js && node --check tools/guest.js",
     "test": "node tools/check-plugin.mjs && node tools/check-client.mjs",
+    "prepublishOnly": "npm run check",
     "probe": "node tools/probe-rfb.mjs"
   }
 }

@@ -1,0 +1,15 @@
+node_modules/
+*.log
+
+# Output of the live probes: frames are run artifacts, not sources.
+probe-out/
+tools/out/
+/shot.png
+/clipboard.png
+/clipboard-read.png
+
+# Local ssh config copies used for isolated probes — never commit keys or hosts.
+.ssh-config
+.ssh-config-*
+
+.DS_Store

@@ -1,0 +1,11 @@
+# Bundle layer of dsh-pve-vm.
+#
+# A single plugin entry. `id` must match the settings namespace: the `settings`
+# service addresses the plugin by the id of its profile entry and builds the form
+# from the exported `Config` schema. `name` is the package name.
+#
+# No config is set here on purpose: defaults come from the schema, and edits made
+# in the settings card are written into the profile patch layer by the service.
+- insert:
+    - id: pve-vm
+      name: dsh-pve-vm

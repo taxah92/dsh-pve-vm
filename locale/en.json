@@ -1,0 +1,4 @@
+{
+  "title": "Proxmox VE VM control",
+  "description": "Look at a VM screen and click in its console over VNC, and run commands or read and write files through the QEMU guest agent. Any guest OS: Windows or Linux with a GUI."
+}

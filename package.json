@@ -1,0 +1,78 @@
+{
+  "name": "dsh-pve-vm",
+  "version": "0.1.0",
+  "description": "Proxmox VE VM control for DeepSeek Harness: see the screen and click in a VM console over VNC, plus commands, files and typed text through the QEMU guest agent.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Anton Veselov <taxah92@gmail.com>",
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "proxmox",
+    "proxmox-ve",
+    "pve",
+    "vnc",
+    "rfb",
+    "computer-use",
+    "qemu",
+    "qemu-guest-agent",
+    "vm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/taxah92/dsh-pve-vm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/taxah92/dsh-pve-vm/issues"
+  },
+  "homepage": "https://github.com/taxah92/dsh-pve-vm#readme",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "locale",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "icon": "./icon.svg",
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.2.0-rc.2"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.2.0-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "scripts": {
+    "check": "node --check index.js && node --check client.js && node --check lib/config.js && node --check lib/guest.js && node --check lib/hmp.js && node --check lib/keys.js && node --check lib/png.js && node --check lib/rfb.js && node --check lib/session.js && node --check lib/ssh.js && node --check tools/console.js && node --check tools/guest.js",
+    "test": "node tools/check-plugin.mjs && node tools/check-client.mjs",
+    "probe": "node tools/probe-rfb.mjs"
+  }
+}

@@ -3,6 +3,43 @@
 All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versions follow [SemVer](https://semver.org/).
 
+## [0.1.1] — 2026-10-13
+
+Linux guest support. Everything below was found by running the plugin against a real RedOS 8
+guest with a MATE desktop, not by reading the code.
+
+### Fixed
+
+* **Guest OS detection rejected almost every Linux distribution.** The guest agent reports `id`
+  from `/etc/os-release`, and only IDs containing `linux` were accepted — RedOS reports `redos`,
+  Debian `debian`, Ubuntu `ubuntu`. All of them landed in `other` and every `vm_*` tool answered
+  *running a shell command is not supported for guest OS «other»*, so the whole guest-agent half
+  was dead on Linux. Windows was unaffected (`mswindows`), which is why it went unnoticed.
+  Windows is now matched first, Linux by `id`/`name`/`pretty-name`, and a non-Windows guest that
+  answered `get-osinfo` with a non-empty `kernel-release` counts as Linux.
+* **`vm_type_text` typed nothing on a GDM desktop.** The built-in typing script used
+  `$home/.Xauthority`, which does not exist when GDM owns the session — RedOS and RHEL keep the
+  file at `/run/user/<uid>/gdm/Xauthority`. `xdotool` then talked to the X server with no
+  authorization at all, failed with *No protocol specified*, and the text never appeared. The
+  script now tries `~/.Xauthority`, then the GDM path, then any `/run/user/<uid>/*/Xauthority`.
+* **`vm_type_text` could not submit text.** `text=$(… | base64 -d)` — command substitution strips
+  trailing newlines, so text ending in `"\n"` was typed without pressing Enter and the shell
+  prompt never came back.
+* **Console errors hid the actual cause.** When the node's `sshd` does not accept `AcceptEnv`,
+  `LC_PVE_TICKET` never arrives and `qm vncproxy` exits with a precise
+  *LC_PVE_TICKET not set, VNC proxy without password is forbidden* — but the RFB reader saw EOF
+  before ssh had finished exiting, so only *the VNC stream was closed by the node* surfaced. The
+  ssh stderr is now reported (after a short grace period), both during the handshake and when a
+  live session dies mid-way.
+
+### Known limitations
+
+* Proxmox applies a **default 5-second timeout to QMP commands** (`PVE/QMPClient.pm`), and
+  `guest-exec` waits for the guest agent to acknowledge. While a previous long command is still
+  running inside the guest that acknowledgement arrives too late and the call fails with
+  *qmp command 'guest-exec' failed - got timeout*. On an idle guest 10 out of 10 calls complete
+  in about a second. `vm_exec` is currently synchronous and does not retry.
+
 ## [0.1.0] — 2026-10-13
 
 Initial public release.

@@ -3,6 +3,25 @@
 All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versions follow [SemVer](https://semver.org/).
 
+## [0.2.1] — 2026-10-14
+
+The plugin card finally speaks Russian — along with the English title it always carried.
+
+### Fixed
+
+* **`locale/en.json` and `locale/ru.json` were written in a format the panel never reads.** The
+  reader (`readPluginMeta` in `dsh-app-boot`) takes display text from a `meta` object —
+  `{"meta": {"title": …, "description": …}}` — and silently drops a flat `{title, description}` file.
+  Both files were flat, so the card in the plugin inventory showed the package name `dsh-pve-vm` and
+  the manifest description, and the Russian text never appeared anywhere. Wrapped in `meta`: the card
+  now reads “Proxmox VE VM control” / “Управление ВМ Proxmox VE” and follows the panel language.
+
+### Checks
+
+* `tools/check-plugin.mjs` now verifies the card metadata: the `meta` shape of every `locale/*.json`,
+  field parity between the languages, and — through the installed harness — that `readPluginMeta`
+  really answers with a translation map instead of the package-name fallback.
+
 ## [0.2.0] — 2026-10-13
 
 Watch the agent work: a live VM screen in the right sidebar of the web UI.

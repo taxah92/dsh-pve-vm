@@ -11,6 +11,7 @@
  * the settings schema, so the compiler is loaded here by the absolute path of the
  * installed dsh.
  */
+import fs from 'node:fs';
 import process from 'node:process';
 
 /**
@@ -248,6 +249,75 @@ try {
   if (disposers !== routes.length) note(`the disposer removed ${disposers} of ${routes.length} routes`);
 } catch (error) {
   note(`panel route check threw: ${error.stack ?? error}`);
+}
+
+// ── Display metadata: the card the panel paints ─────────────────────────────
+// Before any activation the panel reads `locale/en.json` and every other
+// `<language>.json` beside it, taking the text from their `meta` object
+// (dsh-app-boot, readPluginMeta). A flat `{title, description}` file — what
+// 0.2.0 shipped — is dropped without a word, and the card falls back to the
+// package name; that silent downgrade is what this section catches.
+const localeDir = new URL('../locale/', import.meta.url);
+const localeFiles = fs
+  .readdirSync(localeDir)
+  .filter((name) => name.endsWith('.json'))
+  .sort();
+if (localeFiles.length === 0) note('locale/: no display metadata — the panel card falls back to the package name');
+
+const localeFields = new Map();
+for (const name of localeFiles) {
+  const language = name.slice(0, -'.json'.length);
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(new URL(name, localeDir), 'utf8'));
+  } catch (error) {
+    note(`locale/${name}: not valid JSON — ${error.message}`);
+    continue;
+  }
+  const meta = parsed?.meta;
+  if (meta === undefined) {
+    note(`locale/${name}: no top-level "meta" — readPluginMeta drops the file and the card shows the package name`);
+  }
+  for (const field of ['title', 'description']) {
+    const value = meta?.[field];
+    if (typeof value !== 'string' || value.trim() === '') {
+      note(`locale/${name}: meta.${field} must be a non-empty string`);
+    }
+  }
+  localeFields.set(language, Object.keys(meta ?? {}).sort().join(','));
+}
+if (!localeFields.has('en')) note('locale/en.json is required — the reader keys every other language off it');
+const shapes = new Set(localeFields.values());
+if (shapes.size > 1) {
+  const seen = [...localeFields].map(([language, fields]) => `${language}: ${fields || '(no fields)'}`).join('; ');
+  note(`locale/: the files disagree on fields — ${seen}`);
+}
+
+// The reader itself, through the installed harness: it must answer with a
+// translation map, not with the package-name fallback 0.2.0 produced.
+try {
+  const { readPluginMeta } = await import(`${DSH_PACKAGES}/dsh-app-boot/lib/index.js`);
+  if (typeof readPluginMeta !== 'function') {
+    note('this dsh has no readPluginMeta — the card metadata cannot be verified');
+  } else {
+    const manifestUrl = new URL('../package.json', import.meta.url);
+    const manifest = JSON.parse(fs.readFileSync(manifestUrl, 'utf8'));
+    const meta = readPluginMeta(manifest.name, manifestUrl.href);
+    if (meta === undefined) note('readPluginMeta returned nothing — the panel sees no card text at all');
+    else {
+      for (const field of ['title', 'description']) {
+        const value = meta[field];
+        if (typeof value === 'string') note(`readPluginMeta fell back to ${field} "${value}" — the locale files are not being read`);
+        else {
+          for (const language of localeFields.keys()) {
+            if (value?.[language] === undefined) note(`readPluginMeta has no "${language}" ${field} — locale/${language}.json was not read`);
+          }
+        }
+      }
+    }
+  }
+} catch (error) {
+  note(`the live metadata check could not run: ${error?.message ?? error}`);
 }
 
 const summary = {

@@ -2,25 +2,43 @@
  * Guest agent tools: commands, files, state.
  * All of this is cheaper and more reliable than pixels — the console is only needed for the GUI.
  */
+import { randomUUID } from 'node:crypto';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { encodeText } from '../lib/keys.js';
 import { textToSendkeys } from '../lib/hmp.js';
 import { planTyping } from '../lib/keys.js';
 import { encodePng } from '../lib/png.js';
 import { VmError } from '../lib/session.js';
+import { decodeGuestBytes } from '../lib/ssh.js';
 import {
   MAX_FILE_BYTES,
   clipboardHint,
+  hasNonAscii,
+  parseFileChunk,
+  parseWindowsExecEnvelope,
   powershellArgv,
+  windowsExecScriptArgv,
   windowsTypeScript,
   linuxReadFileArgv,
-  linuxWriteFileArgv,
+  linuxWriteFileStdinArgv,
   shellArgv,
   typeTextArgv,
   unsupportedOs,
   windowsReadFileArgv,
-  windowsWriteFileArgv,
+  windowsWriteFileStdinArgv,
 } from '../lib/guest.js';
+
+/**
+ * How many raw file bytes to pull per guest agent call.
+ * 256 KB → ~341 KB of base64, that is comfortably below the verified 512 KB.
+ */
+const FILE_CHUNK_BYTES = 256 * 1024;
+
+/** How many times a call is retried: qemu-ga sometimes answers with a foreign or short reply (a reused pid). */
+const REPLY_ATTEMPTS = 3;
+
+/** Pause between chunk retries, ms. */
+const RETRY_DELAY_MS = 300;
 
 const EXEC_SCHEMA = {
   type: 'object',
@@ -80,14 +98,17 @@ export function guestTools(deps) {
       description:
         'Run a command inside the VM through qemu-guest-agent (Windows: cmd/PowerShell, Linux: shell) and return the ' +
         'output and the exit code. This is cheaper and more accurate than clicking on the screen. It runs as root/SYSTEM ' +
-        'and does not see the graphical user session: GUI applications cannot be pressed this way.',
+        'and does not see the graphical user session: GUI applications cannot be pressed this way. On Windows a `command` ' +
+        'with non-ASCII travels in a base64 envelope (the agent does not survive Unicode in argv), while an `argv` with ' +
+        'non-ASCII is rejected. cmd/PowerShell output is decoded through the guest code page, so non-Latin text is readable.',
       parameters: {
         vmid: { type: 'number', required: true, description: 'VM id.' },
         command: { type: 'string', description: 'Command for the guest shell (if argv is not set).' },
         argv: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Ready-made argv without a shell — more reliable for PowerShell and paths with spaces.',
+          description:
+            'Ready-made argv without a shell — more reliable for PowerShell and paths with spaces. On Windows only ASCII is allowed.',
         },
         shell: {
           type: 'string',
@@ -102,15 +123,62 @@ export function guestTools(deps) {
       },
       timeoutMs: 600000,
       async execute(args, exec) {
-        let argv = Array.isArray(args.argv) && args.argv.length > 0 ? args.argv.map(String) : null;
-        if (!argv) {
-          if (typeof args.command !== 'string' || args.command.length === 0) {
-            throw new VmError('either command or a non-empty argv is required', 'BAD_ARGS');
+        const given = Array.isArray(args.argv) && args.argv.length > 0 ? args.argv.map(String) : null;
+        const command = typeof args.command === 'string' && args.command.length > 0 ? args.command : null;
+        if (!given && !command) throw new VmError('either command or a non-empty argv is required', 'BAD_ARGS');
+        let family = args.shell ?? 'auto';
+        if (family === 'auto') family = await controller.guestOs(args.vmid, { signal: exec?.signal });
+
+        // Windows + non-ASCII: PVE truncates such a QMP payload by a byte per
+        // character (see windowsExecScriptArgv). The shell form is saved by the
+        // base64 envelope, while a ready-made argv has no safe path — we refuse
+        // honestly, with a hint.
+        if (family === 'windows' && (given ? given.some(hasNonAscii) : hasNonAscii(command))) {
+          if (!command) {
+            throw new VmError(
+              'the argv for Windows contains non-ASCII, and PVE corrupts such a payload in QMP: `IO::Multiplex` writes ' +
+                'bytes but trims the buffer by the number of characters, so the `guest-exec` request arrives truncated — ' +
+                'the agent does not answer, PVE tears the QGA channel down, and the agent stays stuck until the service ' +
+                'is restarted (bugs.proxmox.com #6609, #6292; verified 2026-10-17). Pass the same thing through `command` ' +
+                '(the shell): it travels in a base64 envelope and works with Unicode. Or keep only ASCII in the argv ' +
+                '(paths and names — via vm_file_write/vm_file_read, they already travel as base64).',
+              'UNICODE_ARGV_WINDOWS',
+            );
           }
-          let family = args.shell ?? 'auto';
-          if (family === 'auto') family = await controller.guestOs(args.vmid, { signal: exec?.signal });
-          argv = shellArgv(family, args.command);
+          // Request marker: qemu-ga reuses pids, and the output of a previous command can
+          // arrive as the answer to a new one (verified live on 2026-10-17: an empty
+          // “success” instead of `echo Привет-Мир`). Our own nonce in the reply tells our
+          // answer from a foreign one: a mismatch means retry, not “success with no output”.
+          let envelope = null;
+          let problem = null;
+          for (let attempt = 1; attempt <= REPLY_ATTEMPTS; attempt += 1) {
+            const nonce = randomUUID();
+            const typed = await controller.guestExec(args.vmid, windowsExecScriptArgv(command, nonce), {
+              timeoutMs: args.timeoutMs,
+              signal: exec?.signal,
+            });
+            const parsed = parseWindowsExecEnvelope(typed.stdout, nonce);
+            if (parsed.nonceOk && parsed.exitcode !== null) {
+              envelope = { ...parsed, truncated: typed.truncated };
+              break;
+            }
+            problem = parsed.nonceOk ? 'the envelope reply has no exit code' : 'the reply does not match the request marker (foreign agent output)';
+            await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+          }
+          if (envelope === null) {
+            throw new VmError(`the command in VM ${args.vmid} did not run: ${problem}; call it again`, 'STALE_REPLY');
+          }
+          return {
+            vmid: Number(args.vmid),
+            exitcode: envelope.exitcode,
+            stdout: decodeGuestBytes(Buffer.from(envelope.stdoutB64 ?? '', 'base64'), envelope.codePage),
+            stderr: decodeGuestBytes(Buffer.from(envelope.stderrB64 ?? '', 'base64'), envelope.codePage),
+            truncated: envelope.truncated,
+            command: ['cmd.exe', '/c', command],
+          };
         }
+
+        const argv = given ?? shellArgv(family, command);
         const result = await controller.guestExec(args.vmid, argv, { timeoutMs: args.timeoutMs, signal: exec?.signal });
         return {
           vmid: Number(args.vmid),
@@ -126,7 +194,8 @@ export function guestTools(deps) {
       name: 'vm_file_read',
       description:
         'Read a file inside the VM through the guest agent and return its contents. Text files are returned as text ' +
-        '(up to 1 MB), binary files as a binary marker and base64.',
+        '(up to 1 MB), binary files as a binary marker and base64. Large files are read in chunks: an agent reply ' +
+        'larger than ~512 KB does not reach the plugin.',
       parameters: {
         vmid: { type: 'number', required: true, description: 'VM id.' },
         path: { type: 'string', required: true, description: 'Path to the file inside the guest.' },
@@ -159,34 +228,97 @@ export function guestTools(deps) {
       async execute(args, exec) {
         const maxBytes = Math.max(1, Math.min(MAX_FILE_BYTES, Number(args.maxBytes ?? 262144)));
         const family = await controller.guestOs(args.vmid, { signal: exec?.signal });
-        const argv =
-          family === 'windows'
-            ? windowsReadFileArgv(args.path, maxBytes)
-            : family === 'linux'
-              ? linuxReadFileArgv(args.path, maxBytes)
-              : (() => {
-                  throw unsupportedOs(family, 'reading a file');
-                })();
-        const result = await controller.guestExec(args.vmid, argv, { timeoutMs: args.timeoutMs, signal: exec?.signal });
-        if (result.exitcode !== 0) {
-          throw new VmError(`failed to read ${args.path}: ${result.stderr.trim() || result.stdout.trim()}`, 'FILE_READ');
+        const readArgv = (offset, size, nonce) => {
+          if (family === 'windows') return windowsReadFileArgv(args.path, size, offset, nonce);
+          if (family === 'linux') return linuxReadFileArgv(args.path, size, offset, nonce);
+          throw unsupportedOs(family, 'reading a file');
+        };
+        // In chunks: the agent reply travels through the same QGA, and output
+        // larger than ~512 KB does not reach the plugin (measured 2026-10-17:
+        // 512 KB — 2 s, 1 MB — `guest-exec-status got timeout` and a closed agent channel).
+        //
+        // Every chunk is checked twice: against the request marker (is this our reply —
+        // qemu-ga reuses pids and hands over foreign output) and against the real file
+        // length reported by the read script. A short/foreign “success” used to be taken
+        // for the end of the file, and the tool silently returned truncated or plainly
+        // foreign data with `truncated: false`. Now such a reply is retried, and if the
+        // chunk still does not add up, the tool fails honestly instead of lying quietly.
+        const chunks = [];
+        let bytes = 0;
+        let fileSize = null;
+        let truncated = false;
+        while (bytes < maxBytes) {
+          const want = Math.min(FILE_CHUNK_BYTES, maxBytes - bytes);
+          let chunk = null;
+          let problem = null;
+          for (let attempt = 1; attempt <= REPLY_ATTEMPTS; attempt += 1) {
+            const nonce = randomUUID();
+            const result = await controller.guestExec(args.vmid, readArgv(bytes, want, nonce), {
+              timeoutMs: args.timeoutMs,
+              signal: exec?.signal,
+            });
+            if (result.exitcode !== 0) {
+              problem = result.stderr.trim() || result.stdout.trim();
+              await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+              continue;
+            }
+            const parsed = parseFileChunk(result.stdout, nonce);
+            if (!parsed.nonceOk) {
+              // Foreign reply: the pid was reused and a previous command's output arrived
+              // (verified live on 2026-10-17: reading a missing path returned the contents
+              // of a file read earlier). Retry with a fresh marker.
+              problem = 'the reply does not match the request marker (foreign agent output)';
+              await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+              continue;
+            }
+            if (parsed.size !== null) fileSize = parsed.size;
+            const complete = fileSize !== null && bytes + parsed.bytes.length >= fileSize;
+            if (parsed.bytes.length === 0 && complete) {
+              chunk = parsed.bytes;
+              break;
+            }
+            if ((result.truncated || parsed.bytes.length < want) && !complete) {
+              problem =
+                `the agent answered ${parsed.bytes.length} bytes instead of ${want}` +
+                (result.truncated ? ' (the reply was truncated on the node)' : '');
+              await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+              continue;
+            }
+            chunk = parsed.bytes;
+            break;
+          }
+          if (chunk === null) {
+            throw new VmError(
+              `failed to read ${args.path}${bytes > 0 ? ` (at offset ${bytes})` : ''}: ${problem ?? 'empty agent reply'}`,
+              'FILE_READ',
+            );
+          }
+          if (chunk.length === 0) break;
+          chunks.push(chunk);
+          bytes += chunk.length;
+          if (bytes >= maxBytes) {
+            truncated = fileSize === null || fileSize > bytes;
+            break;
+          }
+          if (fileSize !== null && bytes >= fileSize) break;
         }
-        const base64 = result.stdout.replace(/\s+/g, '');
-        const data = Buffer.from(base64, 'base64');
+        const data = Buffer.concat(chunks);
         const mode = args.encoding && args.encoding !== 'auto' ? args.encoding : looksTextual(data) ? 'text' : 'base64';
         return {
           vmid: Number(args.vmid),
           path: String(args.path),
           bytes: data.length,
           encoding: mode,
-          content: mode === 'text' ? data.toString('utf8') : base64,
-          truncated: data.length >= maxBytes,
+          content: mode === 'text' ? data.toString('utf8') : data.toString('base64'),
+          truncated,
         };
       },
     },
     {
       name: 'vm_file_write',
-      description: 'Write a file inside the VM through the guest agent (up to 1 MB per call). Parent directories are created.',
+      description:
+        'Write a file inside the VM through the guest agent (up to 1 MB per call). Parent directories are created. ' +
+        'The contents travel to the guest over stdin: only ~8 KB fit through the command arguments (the CreateProcess limit).',
       parameters: {
         vmid: { type: 'number', required: true, description: 'VM id.' },
         path: { type: 'string', required: true, description: 'Path to the file inside the guest.' },
@@ -207,31 +339,36 @@ export function guestTools(deps) {
       },
       timeoutMs: 300000,
       async execute(args, exec) {
-        const base64 =
+        const data =
           typeof args.dataBase64 === 'string' && args.dataBase64.length > 0
-            ? args.dataBase64.replace(/\s+/g, '')
+            ? Buffer.from(args.dataBase64.replace(/\s+/g, ''), 'base64')
             : typeof args.data === 'string'
-              ? Buffer.from(args.data, 'utf8').toString('base64')
+              ? Buffer.from(args.data, 'utf8')
               : null;
-        if (base64 === null) throw new VmError('either data or dataBase64 is required', 'BAD_ARGS');
-        const bytes = Buffer.from(base64, 'base64').length;
-        if (bytes > MAX_FILE_BYTES) {
+        if (data === null) throw new VmError('either data or dataBase64 is required', 'BAD_ARGS');
+        if (data.length > MAX_FILE_BYTES) {
           throw new VmError(`the file is larger than ${MAX_FILE_BYTES} bytes per call; send it in chunks via vm_exec`, 'TOO_LARGE');
         }
         const family = await controller.guestOs(args.vmid, { signal: exec?.signal });
         const argv =
           family === 'windows'
-            ? windowsWriteFileArgv(args.path, base64)
+            ? windowsWriteFileStdinArgv(args.path)
             : family === 'linux'
-              ? linuxWriteFileArgv(args.path, base64)
+              ? linuxWriteFileStdinArgv(args.path)
               : (() => {
                   throw unsupportedOs(family, 'writing a file');
                 })();
-        const result = await controller.guestExec(args.vmid, argv, { timeoutMs: args.timeoutMs, signal: exec?.signal });
+        // The data goes to stdin: argv does not carry more than ~8 KB (the Windows
+        // CreateProcess limit of 32 767 characters), while PVE accepts up to 1 MiB on stdin.
+        const result = await controller.guestExec(args.vmid, argv, {
+          timeoutMs: args.timeoutMs,
+          signal: exec?.signal,
+          stdin: data,
+        });
         if (result.exitcode !== 0) {
           throw new VmError(`failed to write ${args.path}: ${result.stderr.trim() || result.stdout.trim()}`, 'FILE_WRITE');
         }
-        return { vmid: Number(args.vmid), path: String(args.path), bytes };
+        return { vmid: Number(args.vmid), path: String(args.path), bytes: data.length };
       },
     },
     {
@@ -373,6 +510,7 @@ export function guestTools(deps) {
             [
               `VM ${value.vmid}: the agent ${value.agent ? 'responds' : 'does not respond'}, OS ${value.os ?? 'unknown'}`,
               value.agentError ? `reason: ${value.agentError}` : null,
+              value.agentHint ? `how to recover: ${value.agentHint}` : null,
               value.config ? `config:\n${value.config}` : null,
               value.console ? `console: ${value.console.resolution}${value.console.alive ? '' : ' (closed)'}` : 'console: no session',
             ]

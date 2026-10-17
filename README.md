@@ -138,9 +138,9 @@ Every action tool accepts a common tail: `observe` (return a frame after the act
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `vm_exec` | `vmid`, `command` \| `argv`, `shell?`, `timeoutMs?` | Run a command in the guest (`cmd`/PowerShell on Windows, shell on Linux). Runs as root/SYSTEM and does not see the user's graphical session. |
-| `vm_file_read` | `vmid`, `path`, `maxBytes?`, `encoding?` | Read a file (text, or base64 for binary) through the agent. |
-| `vm_file_write` | `vmid`, `path`, `data` \| `dataBase64` | Write a file (up to 1 MB per call); parent directories are created. |
+| `vm_exec` | `vmid`, `command` \| `argv`, `shell?`, `timeoutMs?` | Run a command in the guest (`cmd`/PowerShell on Windows, shell on Linux). Runs as root/SYSTEM and does not see the user's graphical session. A `command` with non-ASCII travels as a base64 envelope; `argv` must be ASCII. A command that outlives `timeoutMs` keeps running and is reported as `STILL_RUNNING` with its pid. |
+| `vm_file_read` | `vmid`, `path`, `maxBytes?`, `encoding?` | Read a file (text, or base64 for binary) through the agent, in 256 KiB chunks. |
+| `vm_file_write` | `vmid`, `path`, `data` \| `dataBase64` | Write a file (up to 1 MiB per call, sent over stdin); parent directories are created. |
 | `vm_type_text` | `vmid`, `text`, `settleMs?`, `observe?` | Type text through the best available channel: ASCII → console, non-ASCII → the user session on Windows / `xdotool`–`wtype` on Linux. |
 | `vm_status` | `vmid?` | Is the VM allowed, does the agent answer, which OS, are there open console sessions. |
 
@@ -188,6 +188,20 @@ sidebar guide, or let `viewAutoOpen` reveal it the moment the agent touches a co
   session* via `SendKeys` — layout and modifiers stop mattering, and the VM is not restarted. Linux:
   `xdotool type` (X11) or `wtype` (Wayland) inside the active session; both paths run through the
   guest agent in a single call.
+* **Guest channel.** All `qm` calls for one VM (guest exec, status, OS info, sendkey through the
+  monitor) are serialised with a 250 ms gap: QEMU
+  serves a single QMP client at a time and PVE's QMP timeout is 5 s, so back-to-back calls can steal
+  each other's replies. A failed call is retried once, and only when PVE answers “agent is not
+  running” — that check happens before the command is sent, so the retry cannot run anything twice.
+  A file chunk carries the request marker and the real file length next to the data, so a foreign
+  reply (a reused pid) or a short one is retried instead of being mistaken for the end of the file.
+* **Output encoding.** Guest bytes are decoded from the raw bytes: UTF-8 when they are valid,
+  otherwise the console OEM code page (`chcp`) or the system ANSI code page — whichever reads as
+  text. Windows mixes the two: `cmd.exe` messages arrive in ANSI even when `chcp` reports OEM.
+  Non-ASCII `command` text travels as a base64 envelope instead of the raw QMP request, and file
+  data goes over stdin: both work around byte-per-character truncation in PVE
+  ([#6609](https://bugzilla.proxmox.com/show_bug.cgi?id=6609)) and the ~32 KB command-line limit of
+  a Windows guest.
 * **Clipboard.** `ClientCutText` for writing, the extended clipboard pseudo-encoding
   (`VNC_ENCODING_CLIPBOARD_EXT`) with `CAPS`/`REQUEST`/`PROVIDE` for reading. QEMU passes the bytes
   to the guest through `qemu-vdagent`, so the VM needs `vga: <type>,clipboard=vnc` **and** a full
@@ -206,6 +220,10 @@ sidebar guide, or let `viewAutoOpen` reveal it the moment the agent touches a co
 | Uppercase letters turn into garbage | You are on `inputChannel: vnc`, where QEMU's own Shift emulation fights our Shift events. Use `auto`. |
 | Latin characters are not typed at all on a login screen | The guest layout is not Latin: `console_key` with `alt+shift`, then type. |
 | `vm_*` tools report that the agent is not running | `qemu-guest-agent` is missing or wedged (`Restart-Service qemu-ga` on Windows, `systemctl restart qemu-guest-agent` on Linux). Console tools keep working. |
+| `vm_exec` answers `STILL_RUNNING` | The command outlived `timeoutMs` and **is still running** in the guest. Give long commands a larger `timeoutMs`; the reported pid lets you poll for the result. |
+| `UNICODE_ARGV_WINDOWS` | `argv` contained non-ASCII. Pass the text as `command` instead — that path travels as a base64 envelope. |
+| `STALE_REPLY` | The guest agent answered with a foreign reply (a reused pid) three times in a row. Call the tool again; if it keeps happening, restart the agent (`Restart-Service QEMU-GA`). |
+| `agent is not running` on a guest whose agent is installed | The QGA channel blinked — PVE's 5 s QMP timeout on a busy guest. The plugin retries once by itself; if it keeps happening, the agent is really wedged (see the row above). |
 | Console dies after ~15 minutes of idling | That is the `qm vncproxy` bridge timeout. Any tool call reopens the session automatically. |
 
 ## Security

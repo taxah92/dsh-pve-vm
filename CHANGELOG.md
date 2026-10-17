@@ -3,6 +3,81 @@
 All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versions follow [SemVer](https://semver.org/).
 
+## [0.2.2] — 2026-10-17
+
+The guest-agent half made reliable. Everything below was found by running the plugin against a real
+Windows guest (Windows Server 2025 with Defender, 4 GB of RAM), not by reading the code: a live
+19-check suite went from “fails somewhere on every run” to green.
+
+### Fixed
+
+* **A non-ASCII `command` could wedge the guest agent until the `QEMU-GA` service was restarted.**
+  The fault is not in `qemu-ga`: Proxmox truncates non-ASCII QMP payloads by one byte per character
+  (`IO::Multiplex` writes bytes but slices by characters,
+  [Proxmox #6609](https://bugzilla.proxmox.com/show_bug.cgi?id=6609),
+  [#6292](https://bugzilla.proxmox.com/show_bug.cgi?id=6292)), so the `guest-exec` JSON arrives cut.
+  The agent never answers, the QMP call times out, PVE tears the QGA channel down and `qemu-ga` gets
+  stuck on EOF. A Windows `command` containing non-ASCII now travels as a base64 envelope — a `.cmd`
+  file written in the guest OEM code page and launched as a file, with raw output returned as base64;
+  `argv` with non-ASCII is refused before anything is sent (`UNICODE_ARGV_WINDOWS`).
+* **Russian output came back as mojibake** (`lvl=¢¥¤¥­¨ï` instead of `Сведения`). Two things
+  stacked up: PVE puts guest bytes into JSON as latin-1, and a Windows console writes text in its OEM
+  code page (`chcp` → 866), not UTF-8. Output is now decoded from bytes — latin-1 → UTF-8, or the
+  guest code page when it is not UTF-8 — with the code page cached per VM. One code page turned out
+  to be not enough: the messages of `cmd.exe` itself arrive in the system **ANSI** code page
+  (cp1251 on a Russian system) even though `chcp` reports the OEM one, so the decoder tries both and
+  keeps the candidate without box-drawing/currency junk — `Текущая кодовая страница: 866` instead of
+  `╥хъє∙р ъюфютр ёЄЁэшЎр: 866`.
+* **A command longer than 30 s reported a false failure** (`exitcode -1`, empty output): `qm guest
+  exec` waits 30 s by default and returns `{pid}` **without** `exited`, and the plugin did not check.
+  It now passes `--timeout` (our timeout minus 2 s) and inspects `exited`; a command that did not
+  finish is reported as `STILL_RUNNING` with its pid and whatever output was collected, instead of
+  being called a failure.
+* **`vm_file_write` worked only up to ~8 KB.** The payload travelled as base64 inside `argv`, and a
+  Windows command line is capped at 32 767 characters (`CreateProcess`; Linux has `MAX_ARG_STRLEN`),
+  so 10 KB gave `Failed to execute helper program` and 64 KB failed locally with `spawn E2BIG`.
+  File data now goes over stdin (`--pass-stdin`), which raises the limit to **1 MiB per call**.
+* **`vm_file_read` broke the QGA channel at 1 MiB.** An agent reply above ~512 KB does not survive
+  (`guest-exec-status … got timeout`; 512 KB still took ~2 s). Files are now read in 256 KiB chunks
+  with an offset, and a chunk is retried — reading is idempotent.
+* **A successful but short or foreign agent reply could silently corrupt a result.** `qemu-ga`
+  reuses pids, and the tail of a previous command can arrive as the answer to a new one (one live
+  run got the stdout of a running `ping` in reply to `chcp`; another got the contents of a file read
+  earlier in reply to reading a **missing** path). The chunked read mistook a short reply for the end
+  of the file and returned partial data with `truncated: false` — a silent wrong answer. Every read
+  script and the non-ASCII command envelope now print a per-call request marker (`DSH_NONCE=`) and
+  the real file length (`DSH_SIZE=`); a reply that does not match the marker, or a chunk that does
+  not add up, is retried up to three times, and if it still does not, the tool fails
+  (`FILE_READ` / `STALE_REPLY`) instead of returning a quietly incomplete or foreign result. A
+  foreign reply to the non-ASCII envelope used to be parsed as “success with empty output” — that
+  hole is closed too. `truncated` is now derived from the file length, so a file that exactly fills
+  `maxBytes` is no longer flagged as truncated.
+* **PowerShell progress noise ended up in error texts.** With stderr redirected, PowerShell
+  serialises its progress stream into CLIXML (`#< CLIXML …`), and one 1 MiB read “failed” with that
+  blob instead of a reason. Every generated script now starts with
+  `$ProgressPreference='SilentlyContinue'`.
+
+### Changed
+
+* **All `qm` calls to one VM are serialised, with a 250 ms gap between them.** QEMU serves one QMP
+  client at a time and accepts the next connection only after the previous one is closed; without
+  the gap, back-to-back calls stole each other's replies (`guest-exec-status … got timeout`).
+* A failed call is retried exactly once, and only when PVE answers “agent is not running” — that
+  check runs **before** the command is sent, so nothing has been executed in the guest.
+* `vm_status` now explains how to recover a wedged guest agent.
+* Tool descriptions now state the real limits (1 MiB write over stdin, chunked reads, ASCII-only
+  `argv`).
+
+### Notes
+
+* A command that outlives `timeoutMs` **keeps running** in the guest — the plugin says so honestly.
+  Long commands are therefore better given a larger `timeoutMs` than cut off by the timeout.
+* Residual transport flakiness on a busy guest is PVE/QMP behaviour, not the plugin: on mixed load
+  one call in ~20 can still catch the 5-second QMP timeout, and `qemu-ga` can hand back the output of
+  an earlier command when Windows reuses a pid. A chunked file read detects that case (the reply is
+  checked against the file length) and retries; for a plain `vm_exec` reply there is nothing to check
+  it against, so a foreign stdout remains possible — that is a `qemu-ga` artefact, not a plugin bug.
+
 ## [0.2.1] — 2026-10-14
 
 The plugin card finally speaks Russian — along with the English title it always carried.

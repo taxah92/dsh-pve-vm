@@ -3,6 +3,25 @@
 All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versions follow [SemVer](https://semver.org/).
 
+## [0.2.3] — 2026-10-17
+
+### Fixed
+
+* **The npm package was missing `tools/`, so installing from the registry was broken.** `index.js`
+  imports `./tools/console.js` and `./tools/guest.js` — the definitions of all 16 tools — but the
+  `files` list in `package.json` never included that directory. The published tarball therefore could
+  not even be imported: `dsh plugin --profile web add dsh-pve-vm` failed with
+  `ERR_MODULE_NOT_FOUND: Cannot find module '…/tools/console.js'`. Every release up to and including
+  0.2.2 was affected; the GitHub install path (`github:taxah92/dsh-pve-vm`) was not, because it uses
+  the repository itself. `files` now includes `tools/`, and the two-copy gate
+  (`tools/sync-pve-vm.mjs`) checks that every relative import of the packed tree resolves inside the
+  package — so packaging cannot silently drop a directory again. The check was verified against the
+  old list: it reports exactly `index.js → ./tools/console.js` and `index.js → ./tools/guest.js`.
+
+### Notes
+
+* No runtime code changed since 0.2.2.
+
 ## [0.2.2] — 2026-10-17
 
 The guest-agent half made reliable. Everything below was found by running the plugin against a real

@@ -1,6 +1,6 @@
 {
   "name": "dsh-pve-vm",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Proxmox VE VM control for DeepSeek Harness: see the screen and click in a VM console over VNC, plus commands, files and typed text through the QEMU guest agent.",
   "type": "module",
   "license": "MIT",
@@ -39,6 +39,7 @@
     "index.js",
     "client.js",
     "lib",
+    "tools",
     "locale",
     "icon.svg",
     "cordis.patch.yml",

@@ -29,7 +29,8 @@ agent ──► plugin ──► ssh ──► node: qm vncproxy ──► unix 
   modifiers stop mattering.
 * **Clipboard** — `console_paste` writes UTF-8 text into the guest clipboard over RFB and presses
   Ctrl+V; `console_clipboard` reads the guest clipboard back, so text can leave the VM without OCR.
-* **A settings card** in the web UI (English and Russian labels), backed by the profile patch layer.
+* **A settings card** in the web UI (English, Russian and Chinese labels), backed by the profile patch
+  layer.
 * **A live screen panel** — the “VM screen” tab in the right sidebar shows the frames the agent
   sees, taken from the very same VNC session, while the agent works. It follows the agent's VM
   automatically or stays on the VM you pick by hand. Watching only: the panel never clicks or types.

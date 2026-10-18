@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Proxmox VE 虚拟机控制",
+    "description": "通过 VNC 查看虚拟机屏幕并在控制台中点击，通过 QEMU 客户机代理执行命令、读写文件。Windows 或 Linux：控制台需要图形界面，客户机代理不需要。"
+  }
+}

@@ -3,6 +3,17 @@
 All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versions follow [SemVer](https://semver.org/).
 
+## [0.2.4] — 2026-10-18
+
+### Added
+
+* **Simplified Chinese (`zh`) translation.** The web UI's settings card and the “VM screen” sidebar
+  panel now follow the Chinese locale that DeepSeek Harness ships (`zh`, falling back to `en` for
+  anything untranslated). The plugin card in *Settings ▸ Plugins* also reads Chinese, because
+  `locale/zh.json` joins the existing `en`/`ru` metadata files. `tools/check-client.mjs` now fails
+  when a locale is missing a key or a `{placeholder}` differs between dictionaries, so the three
+  dictionaries cannot drift apart silently.
+
 ## [0.2.3] — 2026-10-17
 
 ### Fixed

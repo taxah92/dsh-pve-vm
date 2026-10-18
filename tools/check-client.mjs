@@ -15,6 +15,12 @@ import process from 'node:process';
 
 const problems = [];
 const note = (message) => problems.push(message);
+/** Sorted set of `{name}` placeholders; locales are compared by it. */
+const placeholders = (text) =>
+  [...String(text).matchAll(/\{(\w+)\}/g)]
+    .map((match) => match[1])
+    .sort()
+    .join(',');
 
 let captured = null;
 globalThis.window = {
@@ -79,7 +85,7 @@ else {
       const openTabs = [];
       const locale = {
         register: (ns, localeId, dict) => {
-          dictionaries.push(`${ns}/${localeId}`);
+          dictionaries.push({ ns, localeId, dict });
           if (typeof dict !== 'object') note(`dictionary ${ns}/${localeId} is not an object`);
           return () => {};
         },
@@ -141,7 +147,29 @@ else {
       if (!scopedInjections.some((entry) => entry.includes('sidebarRight') && entry.includes('sidebarRightTabs'))) {
         note('the panel reads sidebarRight/sidebarRightTabs without declaring them through ctx.inject');
       }
-      if (dictionaries.length < 2) note(`dictionaries registered: ${dictionaries.length} (expected ru and en)`);
+      // Translations: the key set and the placeholders must match in every locale.
+      // A missing key silently falls back to English, and a lost `{vmid}` reaches
+      // the user as a literal — so this is a check, not a report.
+      if (dictionaries.length < 3) note(`dictionaries registered: ${dictionaries.length} (expected ru, en and zh)`);
+      const byLocale = new Map(dictionaries.map((entry) => [entry.localeId, entry.dict]));
+      for (const expected of ['ru', 'en', 'zh']) {
+        if (!byLocale.has(expected)) note(`no dictionary for the locale "${expected}"`);
+      }
+      const reference = byLocale.get('en');
+      if (reference !== undefined) {
+        const referenceKeys = Object.keys(reference);
+        for (const [localeId, dict] of byLocale) {
+          if (localeId === 'en') continue;
+          const missing = referenceKeys.filter((key) => !Object.hasOwn(dict, key));
+          const extra = Object.keys(dict).filter((key) => !Object.hasOwn(reference, key));
+          if (missing.length > 0) note(`dictionary ${localeId}: missing keys ${missing.join(', ')}`);
+          if (extra.length > 0) note(`dictionary ${localeId}: extra keys ${extra.join(', ')}`);
+          const broken = referenceKeys.filter(
+            (key) => Object.hasOwn(dict, key) && placeholders(reference[key]) !== placeholders(dict[key]),
+          );
+          if (broken.length > 0) note(`dictionary ${localeId}: placeholder mismatch in ${broken.join(', ')}`);
+        }
+      }
       if (effects.length === 0) note('apply registered no effect');
       if (tabTypes.length !== 1) note(`tab types registered: ${tabTypes.length} (expected one)`);
       for (const definition of tabTypes) {

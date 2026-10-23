@@ -3,6 +3,45 @@
 All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versions follow [SemVer](https://semver.org/).
 
+## [0.2.5] — 2026-10-23
+
+### Fixed
+
+* **The first frame of a QXL/SPICE VM could come out blank.** On guests with a hardware cursor
+  (`vga: qxl`, that is every SPICE VM) QEMU sends a “cursor only” update before the full frame, and
+  the first `waitForUpdate` sometimes ended exactly there — `console_shot` and the “VM screen” panel
+  returned a white frame (reproduced on a 3440x1336 guest: the single wait returned the blank frame,
+  the real one arrived 79–300 ms later). `RfbClient.waitForFrame()` now keeps reading until an update
+  carries a real rectangle, console captures use it, and the panel allows the first frame of a session
+  up to 1.5 s (`FIRST_FRAME_WAIT_MS`) while later frames keep the cheap incremental wait.
+* **The clipboard did not work on SPICE VMs at all.** `console_paste` and `console_clipboard` required
+  `vga: <type>,clipboard=vnc` plus a SPICE agent, which is impossible on `vga: qxl`: the
+  `com.redhat.spice.0` channel is taken by `spicevmc`, and enabling `clipboard=vnc` there would remove
+  the SPICE agent (dynamic resolution and the owner's SPICE clipboard). Both tools now use the guest
+  agent first — on Windows a scheduled task in the logged-in user session (the clipboard is
+  per-session; SYSTEM in session 0 cannot see it), on Linux `xsel`/`xclip`/`wl-copy`/`wl-paste` in the
+  active graphical session, with `XAUTHORITY` discovered the same way as for `vm_type_text`. The VNC
+  clipboard stays as a fallback when the VM has `clipboard=vnc`. A logged-in session is required:
+  there is no clipboard on the logon screen.
+* **Non-ASCII in a guest `argv` could wedge the guest agent.** PVE truncates non-ASCII QMP payloads
+  (`libio-multiplex-perl`, [Proxmox #6609](https://bugzilla.proxmox.com/show_bug.cgi?id=6609),
+  [#6292](https://bugzilla.proxmox.com/show_bug.cgi?id=6292)), so the request arrives cut, `qm guest
+  exec` times out and `qemu-ga` gets stuck until its service is restarted. `VmController` now refuses
+  such an `argv` before anything is sent (`NON_ASCII_ARGV`) and points at stdin/base64 envelopes.
+
+### Changed
+
+* **`typeTextArgv` passes the guest script via base64.** The script from `guestTypeCommand` may contain
+  non-ASCII and used to travel in `argv` — exactly the failure above. It now goes as a base64 payload
+  decoded into `/bin/sh -s`, with the text still arriving in `$1`.
+* `console_paste` and `console_clipboard` timeouts were raised for the task round trip (paste 180 s,
+  read 120 s, a guest-agent read waits at least 15 s), and the clipboard result gained `channel` and
+  `truncated`.
+* **The default Linux input script now picks the first active graphical session.** `loginctl` on
+  RedOS 8 reports an empty `Display` even for an X11 session, so the old `[ -n "$disp" ]` criterion
+  fell through to root's tty sessions and `xdotool` failed with “No protocol specified”. The script
+  filters by session type (`x11`/`wayland`/`mir`) and breaks on the first match.
+
 ## [0.2.4] — 2026-10-18
 
 ### Added

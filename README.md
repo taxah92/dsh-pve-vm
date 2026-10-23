@@ -27,8 +27,11 @@ agent ──► plugin ──► ssh ──► node: qm vncproxy ──► unix 
 * **Unicode text** — a Windows guest gets a scheduled task in the logged-in user's session
   (`SendKeys`), a Linux guest gets `xdotool`/`wtype` through the guest agent. Layout and
   modifiers stop mattering.
-* **Clipboard** — `console_paste` writes UTF-8 text into the guest clipboard over RFB and presses
-  Ctrl+V; `console_clipboard` reads the guest clipboard back, so text can leave the VM without OCR.
+* **Clipboard** — `console_paste` puts UTF-8 text into the guest clipboard and presses Ctrl+V;
+  `console_clipboard` reads the guest clipboard back, so text can leave the VM without OCR. The guest
+  agent is the primary channel (a scheduled task in the logged-in Windows session, `xsel`/`xclip`/
+  `wl-copy`/`wl-paste` on Linux), so it also works on SPICE VMs (`vga: qxl`) where the VNC clipboard
+  cannot reach the guest. The VNC clipboard (`clipboard=vnc`) remains as a fallback.
 * **A settings card** in the web UI (English, Russian and Chinese labels), backed by the profile patch
   layer.
 * **A live screen panel** — the “VM screen” tab in the right sidebar shows the frames the agent
@@ -127,9 +130,9 @@ layer, and the same values can be edited there by hand:
 | `console_scroll` | `vmid`, `x`, `y`, `delta`, … | Wheel: positive scrolls up, negative down. |
 | `console_type` | `vmid`, `text`, … | Printable ASCII only, `\n` presses Enter. Capitals go through Caps Lock, so expect ≈0.1 s per character. |
 | `console_key` | `vmid`, `combo`, … | `enter`, `esc`, `tab`, `ctrl+alt+del`, `win+r`, `alt+f4`, `ctrl+shift+esc`, `f5`, and modifier-only combinations such as `alt+shift` (layout switch). |
-| `console_paste` | `vmid`, `text`, `submit?`, … | Put any Unicode text into the guest clipboard and press Ctrl+V. Needs the clipboard-enabled VGA device and a SPICE agent. |
+| `console_paste` | `vmid`, `text`, `submit?`, … | Put any Unicode text into the guest clipboard and press Ctrl+V. Uses the guest agent (needs a logged-in session); falls back to the VNC clipboard when the VM has `clipboard=vnc`. |
 | `console_batch` | `vmid`, `actions[]`, `observe?`, … | A chain of actions (`move`, `click`, `drag`, `scroll`, `type`, `key`, `wait`) and one frame at the end. |
-| `console_clipboard` | `vmid`, `timeoutMs?` | Read the guest text clipboard (extended VNC clipboard). Empty means "no text". |
+| `console_clipboard` | `vmid`, `timeoutMs?` | Read the guest text clipboard through the guest agent (or the extended VNC clipboard as a fallback). Empty means "no text". |
 | `console_release` | `vmid` | Close the console session (emergency brake: releases the ssh child and the QEMU connection). |
 
 Every action tool accepts a common tail: `observe` (return a frame after the action, default true),
@@ -203,10 +206,15 @@ sidebar guide, or let `viewAutoOpen` reveal it the moment the agent touches a co
   data goes over stdin: both work around byte-per-character truncation in PVE
   ([#6609](https://bugzilla.proxmox.com/show_bug.cgi?id=6609)) and the ~32 KB command-line limit of
   a Windows guest.
-* **Clipboard.** `ClientCutText` for writing, the extended clipboard pseudo-encoding
-  (`VNC_ENCODING_CLIPBOARD_EXT`) with `CAPS`/`REQUEST`/`PROVIDE` for reading. QEMU passes the bytes
-  to the guest through `qemu-vdagent`, so the VM needs `vga: <type>,clipboard=vnc` **and** a full
-  stop/start (device arguments are fixed at start-up), plus a SPICE agent in the guest.
+* **Clipboard.** Two channels. The guest-agent channel runs a scheduled task in the logged-in
+  Windows session (`Set-Clipboard`/`Get-Clipboard`; the clipboard is per-session, so SYSTEM in
+  session 0 cannot see it) or `xsel`/`xclip`/`wl-copy`/`wl-paste` in the active Linux session;
+  it works on SPICE VMs (`vga: qxl`) and needs a logged-in session. The VNC channel uses
+  `ClientCutText` for writing and the extended clipboard pseudo-encoding
+  (`VNC_ENCODING_CLIPBOARD_EXT`) with `CAPS`/`REQUEST`/`PROVIDE` for reading; QEMU passes those bytes
+  to the guest through `qemu-vdagent`, so that VM needs `vga: <type>,clipboard=vnc` **and** a full
+  stop/start (device arguments are fixed at start-up), plus a SPICE agent in the guest. It is used as
+  a fallback when the guest-agent channel is unavailable.
 * **Frames.** RFB Raw/CopyRect rectangles are composited into RGBA (QEMU leaves alpha at zero),
   optionally cropped and downscaled, then encoded to PNG with `node:zlib`.
 
@@ -250,8 +258,9 @@ This plugin gives an agent **root-level hands inside your VMs**. Be deliberate a
 ## Limitations
 
 * Proxmox VE only, QEMU VMs only — no LXC containers, no other hypervisors.
-* Clipboard tools need `clipboard=vnc` on the VM's VGA device and a SPICE agent in the guest;
-  they move **text only** (no files, no images) and only inside a logged-in session.
+* Clipboard tools move **text only** (no files, no images) and only inside a logged-in session:
+  the guest-agent channel needs a running `qemu-guest-agent` and a desktop session, the VNC fallback
+  additionally needs `clipboard=vnc` on the VGA device and a SPICE agent in the guest.
 * Unicode typing in Windows needs an interactive session; on the login screen only ASCII through
   `console_type` works.
 * One console session per VM id, serialized with a mutex; the session is closed on idle.

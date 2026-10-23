@@ -30,7 +30,10 @@ async function capture(controller, attachments, params) {
   return controller.withConsole(params.vmid, async (client) => {
     const grab = async () => {
       client.requestUpdate({ incremental: false });
-      await client.waitForUpdate({ timeoutMs: params.timeoutMs });
+      // Exactly `waitForFrame`: on QXL/SPICE guests (hardware cursor) a "cursor
+      // only" update arrives first, and a single `waitForUpdate` returned an
+      // empty white frame (reproduced on VM 115 2026-10-23).
+      await client.waitForFrame({ timeoutMs: params.timeoutMs });
       return client.snapshot({ drawCursor: params.drawCursor !== false });
     };
     if (params.wake !== false) await client.wake({ settleMs: 400 });
@@ -78,6 +81,42 @@ function shotOutput(meta, extraText) {
     { type: 'text', text: `${extraText ? `${extraText}\n` : ''}${describeShot(meta)}` },
     { type: 'image', attachment: meta.attachment },
   ];
+}
+
+/**
+ * Put text into the guest clipboard through VNC (`ClientCutText`).
+ * Works only when the VM has `vga: <type>,clipboard=vnc` and a spice agent is
+ * alive in the guest session; the path is kept as a fallback for cases when the
+ * guest agent is disabled.
+ * @param {object} controller VM controller.
+ * @param {number} vmid VM id.
+ * @param {string} text text.
+ */
+async function setVncClipboard(controller, vmid, text) {
+  await controller.withConsole(vmid, async (client) => {
+    client.clientCutText(text);
+    // The guest must have time to take the clipboard from QEMU, or Ctrl+V pastes the old content.
+    await sleep(700);
+  });
+}
+
+/**
+ * Press Ctrl+V (and Enter, when needed) in the VM console.
+ * @param {object} controller VM controller.
+ * @param {number} vmid VM id.
+ * @param {boolean} submit press Enter after pasting.
+ */
+async function pressPasteKeys(controller, vmid, submit) {
+  await controller.withConsole(vmid, async (client) => {
+    client.keyEvent(0xffe3, true);
+    await sleep(60);
+    await client.tap(0x76, { holdMs: 40, gapMs: 60 });
+    client.keyEvent(0xffe3, false);
+    if (submit === true) {
+      await sleep(200);
+      await client.tap(0xff0d);
+    }
+  });
 }
 
 /** Frame result schema (the same for every observing tool). */
@@ -128,6 +167,8 @@ const CLIPBOARD_SCHEMA = {
     ok: { type: 'boolean', required: true, description: 'The read completed.' },
     text: { type: 'string', required: true, description: 'Clipboard text (an empty string means no text).' },
     chars: { type: 'number', required: true, description: 'Text length in characters.' },
+    channel: { type: 'string', description: 'Channel: vnc (VNC clipboard) or guest (guest agent).' },
+    truncated: { type: 'boolean', description: 'The text was cut at the read limit (256 KB).' },
   },
 };
 
@@ -525,10 +566,13 @@ export function consoleTools(deps) {
     {
       name: 'console_paste',
       description:
-        'Paste text into the VM via the clipboard: put the string into the guest clipboard ' +
-        '(RFB ClientCutText) and press Ctrl+V. Handles any Unicode and does not depend on the ' +
-        'layout or modifiers. Requires `vga: <type>,clipboard=vnc` on the VM and a SPICE agent ' +
-        '(`spice-agent` / `vdservice`) running in the guest. Without the agent use vm_type_text.',
+        'Paste text into the VM via the clipboard: put the string into the guest clipboard and press Ctrl+V. ' +
+        'Handles any Unicode and does not depend on the layout or modifiers. The main path is the guest agent ' +
+        '(Windows: a task in the user session, Linux: xsel/xclip/wl-copy; a logged-in session is required): it works ' +
+        'on SPICE VMs too (`vga: qxl`), where the VNC clipboard does not reach the guest. If the VM has ' +
+        '`vga: <type>,clipboard=vnc` and the guest path is unavailable, the VNC clipboard is used. Enabling ' +
+        '`clipboard=vnc` on a SPICE VM is not allowed — the spicevmc channel would disappear (dynamic resolution ' +
+        'and clipboard in the SPICE session).',
       parameters: {
         vmid: { type: 'number', required: true, description: 'VM id.' },
         text: { type: 'string', required: true, description: 'Text to paste (any Unicode).' },
@@ -536,24 +580,33 @@ export function consoleTools(deps) {
         ...OBSERVE_PARAMS,
       },
       output: observeOutput,
-      timeoutMs: 120000,
-      async execute(args) {
+      timeoutMs: 180000,
+      async execute(args, exec) {
         const text = String(args.text ?? '');
         if (text.length === 0) throw new VmError('empty text', 'BAD_ARGS');
-        await controller.withConsole(args.vmid, async (client) => {
-          client.clientCutText(text);
-          // The guest must have time to take the clipboard from QEMU, or Ctrl+V pastes the old content.
-          await sleep(700);
-          client.keyEvent(0xffe3, true);
-          await sleep(60);
-          await client.tap(0x76, { holdMs: 40, gapMs: 60 });
-          client.keyEvent(0xffe3, false);
-          if (args.submit === true) {
-            await sleep(200);
-            await client.tap(0xff0d);
+        const channel = await controller.clipboardChannel(args.vmid);
+        let used = 'guest';
+        if (channel === 'guest') {
+          // The VM has no VNC clipboard (SPICE or a config without clipboard=vnc):
+          // only the guest agent, and errors are not swallowed — otherwise the
+          // paste silently does nothing.
+          await controller.guestClipboardSet(args.vmid, text, { signal: exec?.signal });
+          await sleep(300);
+        } else {
+          // The VNC clipboard is configured, but the guest sees it only with a live
+          // spice agent in the session. So try the guest path first, VNC is the fallback.
+          try {
+            await controller.guestClipboardSet(args.vmid, text, { signal: exec?.signal });
+            await sleep(300);
+          } catch (error) {
+            if (!(error instanceof VmError)) throw error;
+            used = 'vnc';
+            await setVncClipboard(controller, args.vmid, text);
           }
-        });
-        const label = `paste(${text.length} characters${args.submit === true ? ' + enter' : ''})`;
+        }
+        await pressPasteKeys(controller, args.vmid, args.submit === true);
+        const channelName = used === 'guest' ? 'guest agent' : 'VNC';
+        const label = `paste(${text.length} characters${args.submit === true ? ' + enter' : ''}; channel ${channelName})`;
         const outcome = await afterAction(args.vmid, label, args, [label]);
         return outcome.value;
       },
@@ -606,12 +659,14 @@ export function consoleTools(deps) {
     {
       name: 'console_clipboard',
       description:
-        'Read the guest text clipboard (the VNC extended clipboard). Requires `vga: <type>,clipboard=vnc` on the VM ' +
-        'and a running SPICE agent in the guest. Handy for taking text out of the VM (an error message, a path, ' +
+        'Read the guest text clipboard. The main path is the guest agent (Windows: a task in the user session, ' +
+        'Linux: xsel/xclip/wl-paste; a logged-in session is required): it works on SPICE VMs too, where the ' +
+        'VNC clipboard does not reach the guest. If the VM has `vga: <type>,clipboard=vnc` and the guest path is ' +
+        'unavailable, the extended VNC clipboard is used. Handy for taking text out of the VM (an error message, a path, ' +
         'output) without OCR. An empty string means the clipboard is empty or holds no text.',
       parameters: {
         vmid: { type: 'number', required: true, description: 'VM id.' },
-        timeoutMs: { type: 'number', description: 'Timeout for the guest reply, ms (default 5000).' },
+        timeoutMs: { type: 'number', description: 'Timeout for the guest reply, ms (default 5000; the guest channel — at least 15000).' },
       },
       output: {
         schema: CLIPBOARD_SCHEMA,
@@ -619,16 +674,51 @@ export function consoleTools(deps) {
           {
             type: 'text',
             text:
-              `VM ${value.vmid} clipboard: ${value.chars} chars\n` +
+              `VM ${value.vmid} clipboard: ${value.chars} chars` +
+              `${value.channel ? `, channel ${value.channel === 'guest' ? 'guest agent' : 'VNC'}` : ''}` +
+              `${value.truncated ? ' (text cut at the read limit)' : ''}\n` +
               (value.text.length > 0 ? value.text : '(empty — the clipboard holds no text)'),
           },
         ],
       },
-      timeoutMs: 60000,
-      async execute(args) {
+      timeoutMs: 120000,
+      async execute(args, exec) {
         const timeoutMs = Math.max(500, Math.min(30000, Number(args.timeoutMs ?? 5000)));
-        const text = await controller.withConsole(args.vmid, async (client) => client.readClipboard({ timeoutMs }));
-        return { vmid: Number(args.vmid), ok: true, text, chars: [...text].length };
+        const channel = await controller.clipboardChannel(args.vmid);
+        const guestRead = () =>
+          controller.guestClipboardGet(args.vmid, {
+            timeoutMs: Math.max(timeoutMs, 15000),
+            signal: exec?.signal,
+          });
+        if (channel === 'guest') {
+          // The VM has no VNC clipboard: read only through the guest agent, errors are not swallowed.
+          const value = await guestRead();
+          return {
+            vmid: Number(args.vmid),
+            ok: true,
+            text: value.text,
+            chars: [...value.text].length,
+            channel: 'guest',
+            truncated: value.truncated,
+          };
+        }
+        // The VNC clipboard is configured, but the spice agent in the session may not
+        // be running (then VNC returns emptiness). Try the guest agent first, then VNC.
+        try {
+          const value = await guestRead();
+          return {
+            vmid: Number(args.vmid),
+            ok: true,
+            text: value.text,
+            chars: [...value.text].length,
+            channel: 'guest',
+            truncated: value.truncated,
+          };
+        } catch (error) {
+          if (!(error instanceof VmError)) throw error;
+          const text = await controller.withConsole(args.vmid, async (client) => client.readClipboard({ timeoutMs }));
+          return { vmid: Number(args.vmid), ok: true, text, chars: [...text].length, channel: 'vnc' };
+        }
       },
     },
     {
